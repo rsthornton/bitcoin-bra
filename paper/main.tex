@@ -1,0 +1,556 @@
+%%
+%% What Bitcoin Can and Cannot Compute
+%% Target: CPP 2027, ACM acmart sigplan style
+%%
+\documentclass[sigplan,10pt,review]{acmart}
+
+%% Bibliography style
+\bibliographystyle{ACM-Reference-Format}
+\citestyle{acmauthoryear}
+
+%% Remove ACM-specific metadata for submission
+\settopmatter{printfolios=true,printccs=false,printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+%% Suppress default conference placeholder
+\acmConference[CPP '27]{ACM SIGPLAN International Conference on Certified Programs and Proofs}{January 2027}{Denver, CO, USA}
+\acmYear{2027}
+\acmDOI{}
+\acmISBN{}
+
+%% Packages (acmart already loads amsmath, amssymb, xcolor, microtype, hyperref)
+\usepackage{mathtools}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tikz-cd}
+
+%% Allow some slack for two-column layout
+\emergencystretch=1.5em
+\tolerance=1000
+
+%% Lean 4 listing style
+\lstdefinelanguage{Lean}{
+  keywords={def,theorem,lemma,instance,structure,where,let,if,then,else,
+            do,some,none,fun,by,import,namespace,end,private,noncomputable,
+            inductive,abbrev,open,deriving,show,change,intro,exact,rw,simp,
+            omega,apply,rcases,have,calc,suffices,induction,with},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[s]{/-}{-/},
+  morestring=[b]",
+  literate={->}{$\to$}2 {<-}{$\gets$}2 {<=}{$\leq$}2 {>=}{$\geq$}2
+}
+\lstset{
+  language=Lean,
+  basicstyle=\small\ttfamily,
+  keywordstyle=\bfseries\color{blue!70!black},
+  commentstyle=\itshape\color{green!50!black},
+  breaklines=true,
+  columns=flexible,
+  aboveskip=0.5\baselineskip,
+  belowskip=0.5\baselineskip
+}
+
+%% Math macros
+\newcommand{\Val}{\operatorname{Value}}
+\newcommand{\St}{\mathcal{S}}
+\newcommand{\Mul}{\mathcal{M}}
+\newcommand{\Fin}{\operatorname{Fin}}
+\newcommand{\sumV}{\operatorname{sumValues}}
+\newcommand{\countP}{\operatorname{countAtPlace}}
+\newcommand{\lean}[1]{\texttt{\small #1}}
+\newcommand{\sorry}{\texttt{sorry}}
+\newcommand{\Nat}{\mathbb{N}}
+\newcommand{\braPN}{\operatorname{braToPetriNet}}
+\newcommand{\collapse}{\operatorname{collapse}}
+\newcommand{\totalV}{\operatorname{totalValue}}
+
+\begin{document}
+
+%%
+%% Title and authors
+%%
+\title{What Bitcoin Can and Cannot Compute: Verified Separation Results for Conservation-Constrained Automata}
+
+\author{Shingai Thornton}
+\affiliation{\institution{Binghamton University}}
+\email{}
+
+\begin{abstract}
+We introduce Bounded-Resource Automata (BRA), a computational model for systems whose state transitions must conserve a bounded discrete resource. A value-only BRA with bound~$C$ has a finite state space of cardinality at most $(C{+}1)^{C}$, placing it within the class of finite-state automata; we prove this via an injective histogram encoding. An identity-tracking BRA (IT-BRA), which assigns unique identifiers to resources, has a countably infinite state space; we prove this by constructing an injection from~$\Nat$. We establish a correspondence between value-only BRAs and bounded Petri nets by exhibiting a weighted place invariant with weight vector $w(p) = p + 1$, inheriting decidability of reachability from classical results. We define a collapse map from Bitcoin's UTXO model to Ethereum's account model, proving it surjective on objects but neither injective nor faithful, precisely characterizing the information loss in the UTXO-to-account passage. Total value is preserved by collapse, establishing conservation as a structural invariant of the UTXO-account boundary independent of implementation model. The entire development is formalized in Lean~4 with Mathlib: 882 lines, 74 declarations, zero errors, zero \sorry{}s. Every claim traces to a named, machine-checked theorem.
+\end{abstract}
+
+\keywords{bounded-resource automata, UTXO model, Lean 4, Petri nets, formal verification, cryptocurrency}
+
+\maketitle
+
+%% ============================================================
+\section{Introduction}\label{sec:intro}
+%% ============================================================
+
+Cryptocurrency protocols enforce conservation laws. No Bitcoin transaction creates value from nothing---except for controlled minting via coinbase rewards---and every transaction must demonstrate that its outputs do not exceed its inputs plus any minting. This conservation constraint is not an incidental implementation detail; it is the defining structural property of UTXO-based ledger systems. A natural question arises: what computational class does this constraint induce? Where do conservation-constrained state machines sit in the standard hierarchy of finite-state automata, pushdown automata, and Turing machines?
+
+This question has not been answered in the existing literature. \citet{nester2020foundation} models UTXO ledgers as symmetric monoidal categories, capturing the algebraic structure of transactions as resource transformations. This framework is elegant and influential---we build on it directly---but it characterizes \emph{structure} (what operations are available) rather than \emph{computational power} (what languages or decision problems can be solved). \citet{lambert2021topos} develops a topos-theoretic framework for consensus protocols, addressing the orthogonal question of agreement and finality rather than computational expressiveness. \citet{swan2024categorical} surveys the emerging field of categorical cryptoeconomics but does not formalize or mechanically verify specific results. The Petri net literature \citep{karp1969parallel,mayr1981algorithm,meseguer1990petri,rackoff1978covering} studies reachability and coverability for nets of various kinds, and we connect to this theory, but the BRA formulation itself and its cryptocurrency interpretation are new. In summary, no prior work (a)~defines the computational class induced by conservation constraints, (b)~proves separation results placing this class relative to standard automata classes, (c)~formally compares UTXO and account models as a map with verified structural properties, or (d)~mechanically verifies any of these results.
+
+We make three contributions:
+\begin{enumerate}
+\item \textbf{BRA as a computational class} (Sections~\ref{sec:bra}--\ref{sec:petri}).
+We define Bounded-Resource Automata, prove that the value-only variant has a finite state space (\lean{state\_space\_finite}), prove that the identity-tracking variant has an infinite state space (\lean{itstate\_infinite}), and establish a correspondence with bounded Petri nets via a weighted place invariant (\lean{weighted\_count\_eq\_sumValues}).
+
+\item \textbf{The collapse functor} (Section~\ref{sec:collapse}).
+We define a map from Bitcoin's UTXO representation to Ethereum's account representation and prove it surjective (\lean{collapse\_surjective}), not injective (\lean{collapse\_not\_injective}), and not faithful (\lean{collapse\_not\_faithful}).
+We prove that conservation commutes with collapse (\lean{conservation\_commutes}), establishing conservation as a model-independent structural invariant.
+
+\item \textbf{Complete Lean~4 formalization} (Section~\ref{sec:formalization}). The entire development is mechanized in Lean~4 with Mathlib: 882 lines across 7 files, 74 declarations, 893 build jobs, zero errors, zero \sorry{}s. The library is the primary artifact; every claim in this paper traces to a named, machine-checked theorem.
+\end{enumerate}
+
+The paper proceeds as follows. Section~\ref{sec:prelim} establishes notation and background. Section~\ref{sec:bra} defines BRA precisely. Section~\ref{sec:finiteness} proves finiteness of the value-only BRA state space. Section~\ref{sec:identity} introduces identity tracking and proves the sharp finite-infinite boundary. Section~\ref{sec:petri} establishes the Petri net correspondence. Section~\ref{sec:collapse} defines and analyzes the collapse functor. Section~\ref{sec:formalization} describes the formalization experience. Section~\ref{sec:related} discusses related work. Section~\ref{sec:future} identifies future directions.
+
+
+%% ============================================================
+\section{Preliminaries}\label{sec:prelim}
+%% ============================================================
+
+\subsection{Lean~4 and Mathlib}
+
+Lean~4~\citep{demoura2021lean} is a dependently typed programming language and proof assistant. Mathlib~\citep{mathlib} is its community-maintained mathematical library, providing extensive coverage of algebra, analysis, combinatorics, and order theory. Our formalization relies on several Mathlib types. \lean{Multiset~$\alpha$} represents finite multisets over a type~$\alpha$, supporting multiplicity, sub-multiset comparison via~$\leq$, addition via~$+$, and subtraction via~$-$. \lean{Finset~$\alpha$} represents finite sets with decidable membership. \lean{Finsupp~$\alpha$~$\beta$} (written $\alpha \to_0 \beta$) represents functions with finite support---maps that are nonzero at only finitely many points. \lean{Fintype~$\alpha$} is a typeclass asserting that~$\alpha$ has finitely many inhabitants, enabling computation of cardinalities. $\Fin(n)$ is the type of natural numbers strictly less than~$n$.
+
+When we say the library is \sorry{}-free, we mean that every proof obligation is fully discharged. The compiled library relies only on Lean's foundational axioms: propositional extensionality, quotient soundness, and the axiom of choice. No \sorry{} (unproved assertion), \lean{native\_decide} (unverified computation), or custom axioms appear anywhere.
+
+\subsection{UTXO and Account Models}
+
+In the \textbf{UTXO model} (Bitcoin), the ledger state at any moment is a multiset of unspent transaction outputs, each carrying a value and an owner address. A transaction consumes a sub-multiset of existing UTXOs as inputs and produces new UTXOs as outputs. The conservation constraint requires $\sumV(\text{inputs}) + \text{coinbase} \geq \sumV(\text{outputs})$.
+
+In the \textbf{account model} (Ethereum), the ledger state is a map from addresses to balances. A transaction specifies transfers between addresses, debiting the sender and crediting the receiver.
+
+The key structural difference is that the UTXO model has \emph{granularity}---multiple coins at the same address are distinct objects distinguished by their creating transaction---and \emph{provenance}---each coin traces to its origin. The account model has neither. Two 5-satoshi UTXOs at an address are distinguishable in Bitcoin; a 10-satoshi balance at an address is a single scalar in Ethereum. This distinction is formalized by our collapse map, which takes a UTXO multiset \lean{UTXOSet := Multiset OwnedUTXO} to a balance map \lean{BalanceMap := Addr $\to_0$ $\Nat$}, and the information lost in this passage is precisely what our non-injectivity and non-faithfulness theorems characterize.
+
+\subsection{Conservation Laws}
+
+A \textbf{conservation constraint} on state transitions requires that the total value of consumed resources plus any minting is at least the total value of produced resources. In the formalization, this appears as a field of the \lean{TransitionSpec} structure (\texttt{BRA/Basic.lean}):
+
+\begin{lstlisting}
+conservation : sumValues consumed + minted
+             >= sumValues produced
+\end{lstlisting}
+
+\noindent The \emph{fee} of a transition is $\text{fee} = \sumV(\text{consumed}) + \text{minted} - \sumV(\text{produced})$. Conservation is the defining constraint of Bounded-Resource Automata---it is what separates BRA from arbitrary finite-state machines.
+
+
+%% ============================================================
+\section{Bounded-Resource Automata}\label{sec:bra}
+%% ============================================================
+
+\subsection{The Value Domain}
+
+\begin{definition}[\lean{Value~C}, \texttt{Basic.lean:30}]\label{def:value}
+For a bound $C : \Nat$, a \emph{value} is a positive natural number at most~$C$:
+\[
+  \Val(C) = \{v \in \Nat \mid 0 < v \wedge v \leq C\}.
+\]
+\end{definition}
+
+Values are strictly positive because zero-value UTXOs carry no economic content (this mirrors Bitcoin's dust limit), and bounded above because~$C$ caps the total system value. Given a multiset $s : \Mul(\Val(C))$, we define $\sumV(s) = \sum_{v \in s} v$ (\lean{sumValues}, \texttt{Basic.lean:41}).
+
+\subsection{States}
+
+\begin{definition}[\lean{State~C}, \texttt{Basic.lean:48}]\label{def:state}
+A \emph{BRA state} with bound~$C$ is a pair $(U, \pi)$ where $U : \Mul(\Val(C))$ is a multiset of active values and $\pi$ is a proof that $\sumV(U) \leq C$.
+\end{definition}
+
+We use multisets rather than finite sets because duplicate values are meaningful: two UTXOs of value~5 are distinct elements by multiplicity, reflecting Bitcoin's UTXO semantics. We write $\St(C)$ for the type \lean{State~C}. The \emph{empty state} \lean{State.empty~C} has $U = \emptyset$. The \emph{size} of a state is $|U|$.
+
+\subsection{Transitions}
+
+\begin{definition}[\lean{TransitionSpec~C}, \texttt{Basic.lean:72}]\label{def:transition}
+A \emph{transition specification} with bound~$C$ consists of a multiset $\mathrm{consumed} : \Mul(\Val(C))$ of values to remove, a multiset $\mathrm{produced} : \Mul(\Val(C))$ of values to add, a natural number $\mathrm{minted} : \Nat$ of newly created value (coinbase; zero for ordinary transactions), and a proof of the conservation constraint $\sumV(\mathrm{consumed}) + \mathrm{minted} \geq \sumV(\mathrm{produced})$.
+\end{definition}
+
+Application of a transition to a state (\lean{State.apply}, \texttt{Basic.lean:89}) returns \lean{Option (State~C)}. It succeeds only if the consumed multiset is a sub-multiset of the current UTXOs and the resulting total value does not exceed~$C$.
+
+\subsection{BRA as a Computational Model}
+
+\begin{definition}[\lean{BoundedResourceAutomaton}]\label{def:bra}
+A \emph{Bounded-Resource Automaton} over an input alphabet~$\alpha$ consists of a resource bound~$C$, an initial state in $\St(C)$, a transition function $\mathrm{step} : \St(C) \to \alpha \to \mathrm{Option}(\mathrm{TransitionSpec}(C))$, and an accepting predicate on states.
+\end{definition}
+
+The \lean{run} function (\texttt{Basic.lean:118}) processes an input list recursively from the tail, threading the state through successive transitions. If any transition fails, the entire run fails. A BRA accepts a string if \lean{run} produces a final state satisfying the accepting predicate. This structure mirrors a deterministic finite automaton with two modifications: the state space carries the invariant $\sumV \leq C$, and every transition must satisfy conservation.
+
+\subsection{Running Example: $C = 3$}\label{sec:example}
+
+Consider a BRA with bound $C = 3$. The value domain is $\Val(3) = \{1, 2, 3\}$. The state space consists of all multisets over $\Val(3)$ with total value at most~3:
+\[
+\emptyset,\; \{1\},\; \{2\},\; \{3\},\; \{1,1\},\; \{1,2\},\; \{1,1,1\}.
+\]
+There are 7~states. The histogram of $\{1,2\}$ is $h(1) = 1,\; h(2) = 1,\; h(3) = 0$, an element of $\Val(3) \to \Fin(4)$.
+
+A transition $t$ consuming $\{1, 2\}$ and producing $\{3\}$ with $\mathrm{minted} = 0$ satisfies conservation: $\sumV(\{1,2\}) = 3 \geq 3 = \sumV(\{3\})$. Applying~$t$ to state $\{1,2\}$ yields state $\{3\}$: remove $\{1,2\}$, add $\{3\}$, total value $3 \leq 3$.
+
+In the corresponding Petri net, the three places $p_0, p_1, p_2$ represent values 1, 2, 3. The marking for state $\{1,2\}$ is $m(p_0) = 1,\; m(p_1) = 1,\; m(p_2) = 0$. The weighted sum $1 \cdot 1 + 2 \cdot 1 + 3 \cdot 0 = 3 = \sumV(\{1,2\})$ illustrates the bridge lemma (Theorem~\ref{thm:bridge}).
+
+
+%% ============================================================
+\section{Finiteness of the State Space}\label{sec:finiteness}
+%% ============================================================
+
+The central structural result for value-only BRA is that the state space is finite. This is not obvious from the definition---a multiset over $\Val(C)$ could in principle have unbounded cardinality---but conservation forces it.
+
+\subsection{The Value Type is Finite}
+
+\begin{theorem}[\lean{Value.equivFin}, \texttt{Finiteness.lean:22}]\label{thm:value-equiv}
+$\Val(C) \simeq \Fin(C)$.
+\end{theorem}
+
+The equivalence maps $v$ to $v - 1$, shifting $\{1, \ldots, C\}$ to $\{0, \ldots, C{-}1\}$. This immediately yields a \lean{Fintype} instance for $\Val(C)$ via \lean{Fintype.ofEquiv}.
+
+\begin{theorem}[\lean{value\_card}, \texttt{Finiteness.lean:39}]\label{thm:value-card}
+$|\Val(C)| = C$.
+\end{theorem}
+
+\subsection{State Size Bound}
+
+\begin{lemma}[\lean{card\_le\_sum\_of\_one\_le}, \texttt{Finiteness.lean:45}]\label{lem:card-sum}
+For a multiset~$s$ of natural numbers with every element $\geq 1$, $|s| \leq \sum s$.
+\end{lemma}
+
+The proof proceeds by induction on the multiset. In the cons case, $a \geq 1$ and $|s| \leq \sum s$ give $|a :: s| = |s| + 1 \leq \sum s + a$.
+
+\begin{theorem}[\lean{state\_size\_bound}, \texttt{Finiteness.lean:56}]\label{thm:size-bound}
+For any state $s \in \St(C)$, $|s.\mathrm{utxos}| \leq C$.
+\end{theorem}
+
+Every value in $\Val(C)$ is at least~1 by definition. Applying Lemma~\ref{lem:card-sum} gives $|s.\mathrm{utxos}| \leq \sumV(s.\mathrm{utxos}) \leq C$. This bound is tight: $C$~UTXOs each of value~1 achieve it.
+
+\subsection{Finiteness via Histogram Injection}
+
+\begin{definition}[\lean{State.toHistogram}, \texttt{Finiteness.lean:72}]\label{def:histogram}
+The \emph{histogram} of a state~$s$ is $h_s : \Val(C) \to \Fin(C{+}1)$ where $h_s(v) = \mathrm{count}(v, s.\mathrm{utxos})$.
+\end{definition}
+
+Each count is at most~$C$ (Theorem~\ref{thm:size-bound}), so it fits in $\Fin(C{+}1)$.
+
+\begin{theorem}[\lean{State.toHistogram\_injective}]\label{thm:histogram-inj}
+The histogram map is injective.  \textup{(\texttt{Finiteness.lean:79})}
+\end{theorem}
+
+If two states have the same histogram, they have the same count for every value, so by multiset extensionality they have the same underlying multiset.
+
+\begin{theorem}[\lean{state\_space\_finite}, \texttt{Finiteness.lean:96}]\label{thm:finite}
+$\St(C)$ is a finite type.
+\end{theorem}
+
+The histogram injection embeds $\St(C)$ into $\Val(C) \to \Fin(C{+}1)$. Since both $\Val(C)$ and $\Fin(C{+}1)$ are finite, their function space is finite, and an injective map into a finite type yields a finite type via \lean{Fintype.ofInjective}.
+
+\subsection{Cardinality Bound}
+
+\begin{theorem}[\lean{bra\_state\_space\_card\_bound}]\label{thm:card-bound}
+$|\St(C)| \leq (C+1)^C$.  \textup{(\texttt{Separation.lean:27})}
+\end{theorem}
+
+The histogram injection gives $|\St(C)| \leq |\Val(C) \to \Fin(C{+}1)| = (C{+}1)^C$. The actual number of states equals the sum over $n = 0, \ldots, C$ of the number of integer partitions of~$n$ into parts from $\{1, \ldots, C\}$. The $(C{+}1)^C$ bound is crude but sufficient: it establishes finiteness, and therefore inclusion in the class of finite-state automata. Every value-only BRA is equivalent to a DFA with at most $(C{+}1)^C$ states, so every BRA-recognizable language is regular.
+
+
+%% ============================================================
+\section{Identity Tracking and the Finite-Infinite Boundary}\label{sec:identity}
+%% ============================================================
+
+In Bitcoin, each UTXO has a globally unique identifier (the hash of its creating transaction concatenated with an output index). The value-only BRA of Section~\ref{sec:bra} discards this identity, retaining only the denomination. What happens when we restore it?
+
+\subsection{Identified UTXOs and IT-BRA States}
+
+\begin{definition}[\lean{IUTXO~C}, \texttt{IdentityTracking.lean:20}]\label{def:iutxo}
+An \emph{identified UTXO} is a pair $(n, v)$ where $n : \Nat$ is a unique identifier and $v : \Val(C)$ is a value.
+\end{definition}
+
+\begin{definition}[\lean{ITState~C}, \texttt{IdentityTracking.lean:27}]\label{def:itstate}
+An \emph{IT-BRA state} with bound~$C$ consists of a finite set $\mathrm{utxos} : \mathrm{Finset}(\mathrm{IUTXO}(C))$ of active identified UTXOs, a proof that all IDs are distinct, a proof that total value is bounded by~$C$, a counter $\mathrm{next\_id} : \Nat$ recording the next available fresh identifier, and a proof that all active IDs are below $\mathrm{next\_id}$.
+\end{definition}
+
+The $\mathrm{next\_id}$ counter is monotone, ensuring that no identifier is ever reused. This models the fact that Bitcoin transaction identifiers are cryptographic hashes and are (with overwhelming probability) globally unique.
+
+\subsection{The Infinite State Space}
+
+\begin{theorem}[\lean{itstate\_infinite}]\label{thm:infinite}
+For $C \geq 1$, $\St_{\mathrm{IT}}(C)$ is not finite: $\neg\, \mathrm{Finite}(\mathrm{ITState}(C))$.
+\end{theorem}
+
+The proof constructs an injection $f : \Nat \to \mathrm{ITState}(C)$. For each~$n$, $f(n)$ is the state containing a single UTXO with identifier~$n$ and value~1, with $\mathrm{next\_id} = n + 1$. This is valid: total value $1 \leq C$, the single ID~$n$ is below $n + 1$, and distinctness is trivial for a singleton. Injectivity follows from comparing $\mathrm{next\_id}$ fields. The existence of an injection from~$\Nat$ into a type assumed finite contradicts the infinitude of~$\Nat$.
+
+This result is sharp. The conservation constraint is identical, and the value domain is the same. The \emph{only} difference is the presence of unique identifiers. Yet this single addition explodes the state space from finite to countably infinite. The result holds even at~$C = 1$: with one unit of value, the value-only BRA has finitely many states, while the IT-BRA has infinitely many (one for each possible identifier on the single UTXO). The source of infinity is not the value structure but the identity counter.
+
+\subsection{IT-BRA Transitions}
+
+The transition function \lean{ITState.apply} (\texttt{Identity\-Tracking.lean:121}) checks that all consumed IDs exist, computes remaining UTXOs, assigns fresh IDs to produced values via \lean{assign\-Fresh\-Ids}, and verifies the bound.
+Helper lemmas \lean{assign\-Fresh\-Ids\_mem} and \lean{assign\-Fresh\-Ids\_injective} verify that fresh IDs are in range and distinct.
+All proof obligations---ID distinctness, boundedness, and the $\mathrm{ids\_below}$ property---are discharged without \sorry{}, requiring a four-way case analysis on whether each UTXO in the new state came from the remaining set or the freshly assigned set.
+
+\subsection{The Boundary}
+
+Value-only BRA $\subseteq$ FSA follows from finiteness (Theorem~\ref{thm:finite}). IT-BRA $\not\subseteq$ FSA follows from Theorem~\ref{thm:infinite}. Identity tracking is the exact feature that crosses the finite-infinite divide: same conservation constraint, same value domain, but the addition of unique identifiers takes the state space from finite to countably infinite.
+
+This boundary is remarkably sharp. At $C = 1$---the smallest nontrivial bound---a value-only BRA has exactly two states ($\emptyset$ and $\{1\}$), a two-state DFA. The corresponding IT-BRA at $C = 1$ has infinitely many states: $\{(0, 1)\}$, $\{(1, 1)\}$, $\{(2, 1)\}$, and so on, one for each possible identifier on the single UTXO. The source of infinity is not the value structure but the monotone identity counter, which models the fact that Bitcoin's UTXO identifiers are never reused.
+
+For Bitcoin specifically, this means that even a maximally simplified Bitcoin---one satoshi, one address, no scripting---already has an infinite state space, because each UTXO carries a unique transaction hash. The conservation constraint alone produces finiteness; it is Bitcoin's identity tracking that produces the computational gap. Open separation questions (strict BRA~$\subsetneq$~FSA, IT-BRA recognizes $\{a^n b^n\}$, IT-BRA~$\subsetneq$~Turing) are discussed in Section~\ref{sec:future}.
+
+
+%% ============================================================
+\section{Petri Net Correspondence}\label{sec:petri}
+%% ============================================================
+
+Petri nets~\citep{meseguer1990petri} provide a well-studied framework for concurrent systems with token-based resource management. We show that every value-only BRA gives rise to a bounded Petri net.
+
+\subsection{The BRA Petri Net}
+
+\begin{definition}[\lean{braToPetriNet}, \texttt{PetriNet.lean:62}]\label{def:bra-pn}
+The \emph{BRA Petri net} with bound~$C$ has places $\Fin(C)$, where place~$i$ represents value $i + 1$. The map \lean{Value.toPlace} sends value~$v$ to place $v - 1$. Transitions are BRA transition specifications. Pre- and post-conditions count UTXOs at each value via \lean{countAtPlace} (\texttt{PetriNet.lean:55}). The weight vector is $w(p) = p + 1$ (\lean{braWeightVector}).
+\end{definition}
+
+\begin{theorem}[\lean{bra\_transition\_enables\_petri}]\label{thm:enables}
+If a BRA transition is applicable ($\mathrm{consumed} \leq \mathrm{utxos}$), then the corresponding Petri net transition is enabled at the derived marking.  \textup{(\texttt{PetriNet.lean:79})}
+\end{theorem}
+
+The proof applies \lean{Multiset.count\_le\_of\_le} to \lean{Multiset.map\_le\_map} of the sub-multiset relation.
+
+\subsection{The Bridge Lemma}
+
+\begin{theorem}[\lean{weighted\_count\_eq\_sumValues}]\label{thm:bridge}
+For any multiset $s : \Mul(\Val(C))$,
+\[
+  \sum_{p \in \Fin(C)} (p + 1) \cdot \countP(s, p) = \sumV(s).
+\]
+\end{theorem}
+
+This identity says that weighting each place by $p + 1$ and summing the weighted token counts recovers the total value. The weight vector $w(p) = p + 1$ is natural because place~$p$ represents value $p + 1$; the identity is nontrivial because it relates a sum over places with multiplicities (left) to a sum over multiset elements (right).
+
+The proof proceeds by induction on the multiset. For the inductive step, adding value~$v$ to multiset~$t$, we decompose $\countP$ through \lean{Multiset.count\_cons}: the count at place~$p$ in $v :: t$ equals the count in~$t$ plus an indicator. Distributing multiplication via \lean{Nat.mul\_add} and splitting the sum via \lean{Finset.sum\_add\_distrib}, the inductive hypothesis handles the first sum. The indicator sum is collapsed by \lean{Finset.sum\_eq\_single}: only the term at $p = \mathrm{toPlace}(v)$ is nonzero, and its value is $v$ by \lean{Value.toPlace\_val}.
+
+\subsection{Conservation and Boundedness}
+
+\begin{theorem}[\lean{bra\_petri\_net\_invariant}]\label{thm:invariant}
+For every BRA transition~$t$:
+\[
+\textstyle\sum_p w(p) \cdot \mathrm{pre}(t,p) + t.\mathrm{minted} \geq \sum_p w(p) \cdot \mathrm{post}(t,p).
+\]
+\textup{(\texttt{PetriNet.lean:127})}
+\end{theorem}
+
+The weight vector gives a generalized place invariant. The proof applies Theorem~\ref{thm:bridge} twice, reducing the inequality to \lean{t.conservation}.
+
+\begin{theorem}[\lean{bra\_petri\_net\_bounded}, \texttt{PetriNet.lean:136}]\label{thm:bounded}
+For any BRA state~$s$: $\sum_p w(p) \cdot m_s(p) \leq C$.
+\end{theorem}
+
+The proof applies Theorem~\ref{thm:bridge}, reducing to \lean{s.bound}. This establishes that the BRA Petri net is \emph{bounded}, inheriting decidability of reachability from \citet{rackoff1978covering}: in EXPSPACE for the general case, PSPACE for fixed dimension. We record this as a placeholder theorem (\lean{bra\_reachability\_decidable}, proved as \lean{True}) because formalizing the Rackoff algorithm is a separate project; the verified contribution is the connection from BRA to bounded Petri nets.
+
+
+%% ============================================================
+\section{The Collapse Functor}\label{sec:collapse}
+%% ============================================================
+
+We now turn from the computational class of BRA to the comparison between Bitcoin's UTXO model and Ethereum's account model. The central construction is a map---the \emph{collapse}---that forgets UTXO granularity and provenance, retaining only aggregate balances per address.
+
+\subsection{The UTXO and Account Models}
+
+An \emph{owned UTXO} (\lean{OwnedUTXO}, \texttt{UTXO.lean:25}) pairs a positive value with an owner address. A \emph{UTXO set} is $\mathrm{UTXOSet} := \mathrm{Multiset}(\mathrm{OwnedUTXO})$. A \emph{transaction} (\lean{Transaction}, \texttt{UTXO.lean:41}) specifies inputs, outputs, a coinbase amount, and a conservation proof.
+
+\begin{theorem}[\lean{conservation\_functor}, \texttt{UTXO.lean:67}]\label{thm:conservation}
+For a valid transaction ($\mathrm{inputs} \leq s$):
+$\totalV(s - \mathrm{inputs} + \mathrm{outputs}) + \mathrm{fee} = \totalV(s) + \mathrm{coinbase}.$
+\end{theorem}
+
+The additive form avoids natural number truncation. The proof establishes that $\totalV$ is additive over multiset addition, decomposes $s = (s - \mathrm{inputs}) + \mathrm{inputs}$, and closes with \lean{omega}.
+
+A \emph{balance map} (\lean{BalanceMap}, \texttt{Collapse.lean:21}) is $\mathrm{Addr} \to_0 \Nat$, a finitely-supported function from addresses to balances.
+
+\subsection{The Collapse Map}
+
+\begin{definition}[\lean{collapse}, \texttt{Collapse.lean:44}]\label{def:collapse}
+$\collapse(s) = \sum_{u \in s} \mathrm{single}(u.\mathrm{owner}, u.\mathrm{value}),$
+where $\mathrm{single}$ constructs a \lean{Finsupp} that is $u.\mathrm{value}$ at $u.\mathrm{owner}$ and zero elsewhere.
+\end{definition}
+
+\subsection{Surjective on Objects}
+
+\begin{theorem}[\lean{collapse\_surjective}, \texttt{Collapse.lean:58}]\label{thm:surjective}
+$\collapse$ is surjective.
+\end{theorem}
+
+The proof proceeds by induction on the Finsupp structure using \lean{Finsupp.induction}. For $b = \mathrm{single}(a, n) + f$, add one UTXO $(n, a)$ to the preimage of~$f$. Every balance distribution can be realized by some UTXO set---the canonical construction uses one UTXO per address.
+
+\subsection{Not Injective on Objects}
+
+\begin{theorem}[\lean{collapse\_not\_injective}, \texttt{Collapse.lean:72}]\label{thm:not-inj}
+$\collapse$ is not injective.
+\end{theorem}
+
+The witness is $s_1 = \{(3, \mathrm{addr}_0), (7, \mathrm{addr}_0)\}$ and $s_2 = \{(10, \mathrm{addr}_0)\}$. Both collapse to $\mathrm{addr}_0 \mapsto 10$. Collapse destroys \emph{UTXO granularity}: a 3-satoshi and a 7-satoshi UTXO are indistinguishable from a single 10-satoshi UTXO at the account level.
+
+\subsection{Not Faithful}
+
+\begin{theorem}[\lean{collapse\_not\_faithful}, \texttt{Collapse.lean:91}]\label{thm:not-faithful}
+There exist distinct transactions with the same effect on balance maps.
+\end{theorem}
+
+The witness uses $s = \{(3, \mathrm{addr}_0), (7, \mathrm{addr}_0)\}$ and two transactions: $\mathrm{tx}_1$ consumes and reproduces the 3-valued UTXO; $\mathrm{tx}_2$ consumes and reproduces the 7-valued UTXO. Both are identity on the balance map. Collapse destroys \emph{provenance}: different UTXO reorganizations producing the same aggregate balance change are identified.
+
+\subsection{Placeholders: Not Full, Not Monoidal}
+
+Two properties remain as placeholders, proved as \lean{True}. The collapse is \emph{not full} (\lean{collapse\_not\_full}): transferring~5 from an address holding a single 7-valued UTXO requires creating change---a structurally different operation from a simple balance transfer. Formalizing this requires morphism categories for both models. The collapse is \emph{not monoidal} (\lean{collapse\_not\_monoidal}): parallel UTXO transactions on disjoint sets are independent, but all account balances share a single address space. Formalizing this requires monoidal category structure from Mathlib's \lean{CategoryTheory} library.
+
+\subsection{Conservation Commutes}
+
+\begin{theorem}[\lean{conservation\_commutes}, \texttt{Collapse.lean:132}]\label{thm:commutes}
+For any UTXO set~$s$: $\totalV(\collapse(s)) = \totalV(s)$.
+\end{theorem}
+
+The proof proceeds by induction on the UTXO multiset. The key step distributes $\totalV$ over Finsupp addition using \lean{Finsupp.sum\_add\_index'} and handles singletons via \lean{Finsupp.sum\_single\_index}.
+
+\begin{theorem}[\lean{conservation\_through\_collapse}]\label{thm:through}
+For zero-fee, non-coinbase transactions:
+\begin{multline*}
+\totalV(\collapse(s - \mathrm{inputs} + \mathrm{outputs})) \\= \totalV(\collapse(s)).
+\end{multline*}
+\textup{(\texttt{Collapse.lean:155})}
+\end{theorem}
+
+Conservation commuting with collapse is the punchline of the collapse analysis, captured by the following diagram:
+\[
+\begin{tikzcd}
+\mathrm{UTXOSet} \arrow[r, "\collapse"] \arrow[d, "\totalV"'] & \mathrm{BalanceMap} \arrow[d, "\totalV"] \\
+\Nat \arrow[r, equal] & \Nat
+\end{tikzcd}
+\]
+The collapse destroys granularity (Theorem~\ref{thm:not-inj}), provenance (Theorem~\ref{thm:not-faithful}), and likely compositionality and structural correspondence of morphisms. But it preserves exactly one thing: total value. Conservation is a \emph{structural invariant} of the UTXO-account boundary. Any protocol analysis that depends only on conservation---not on which specific UTXOs are spent, not on the internal structure of transactions---is valid in both models. This is the formal content of the observation that Bitcoin and Ethereum, despite radically different state representations, enforce the same conservation law.
+
+\begin{table}[t]
+\caption{Properties of the collapse map.}\label{tab:collapse}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llll@{}}
+\toprule
+Property & Status & Lean name & Interpretation \\
+\midrule
+Surjective & Proved & \lean{collapse\_surjective} & Preimage exists \\
+Not injective & Proved & \lean{collapse\_not\_injective} & Granularity lost \\
+Not faithful & Proved & \lean{collapse\_not\_faithful} & Provenance lost \\
+Not full & Placeholder & \lean{collapse\_not\_full} & Change differs \\
+Not monoidal & Placeholder & \lean{collapse\_not\_monoidal} & Compositionality lost \\
+Conservation & Proved & \lean{conservation\_commutes} & Value preserved \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+
+%% ============================================================
+\section{Formalization Experience}\label{sec:formalization}
+%% ============================================================
+
+\subsection{Library Structure}
+
+\begin{table}[t]
+\caption{Library statistics.}\label{tab:library}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+File & Lines & Decl. & Key theorem \\
+\midrule
+\texttt{Basic} & 139 & 13 & \lean{State.apply} \\
+\texttt{Finiteness} & 98 & 9 & \lean{state\_space\_finite} \\
+\texttt{IdentityTracking} & 166 & 8 & \lean{itstate\_infinite} \\
+\texttt{PetriNet} & 148 & 15 & \lean{weighted\_count\_eq\_sumValues} \\
+\texttt{Separation} & 61 & 5 & \lean{bra\_state\_space\_card\_bound} \\
+\texttt{UTXO} & 106 & 11 & \lean{conservation\_functor} \\
+\texttt{Collapse} & 164 & 13 & \lean{conservation\_commutes} \\
+\midrule
+\textbf{Total} & \textbf{882} & \textbf{74} & \textbf{0 errors, 0 \sorry{}} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The formalization (Table~\ref{tab:library}) consists of 882 lines of Lean~4, compiled against Mathlib on Lean~4.28.0-rc1. No custom axioms, no \sorry{}, no \lean{native\_decide}.
+
+\subsection{Proof Engineering Lessons}
+
+Finiteness via injection (\lean{state\_space\_finite}) was mechanical once the histogram encoding was identified; Mathlib's \lean{Fintype.ofInjective} handles the heavy lifting. The conservation functor was similarly straightforward: the additive formulation avoids natural number truncation, and \lean{omega} closes the arithmetic. Collapse surjectivity was a natural fit for \lean{Finsupp.induction}.
+
+The bridge lemma (\lean{weighted\_count\_eq\_sumValues}) required the most effort: managing \lean{Multiset.count\_cons} inside a \lean{Finset.sum}, distributing multiplication over conditionals, and collapsing the indicator sum via \lean{Finset.sum\_eq\_single}. A \lean{DecidableEq} issue with the Petri net structure's opaque \lean{Place} type required introducing \lean{countAtPlace} as a helper on $\Fin(C)$ directly. The IT-BRA transition function required 30 lines of case analysis because \lean{simp}/\lean{dsimp} could not see through \lean{let} bindings.
+
+A recurring surprise: multiset literals \lean{\{a, b\} : Multiset~$\alpha$} desugar to \lean{Insert.insert a (Singleton.singleton b)}, not to $a ::_m b ::_m 0$. This means \lean{simp only [Multiset.map\_cons]} fails silently; full \lean{simp} is needed.
+
+\subsection{The Synthetic Formal System Advantage}
+
+Cryptocurrency protocols are \emph{designed} formal systems. The conservation constraint is not an empirical observation---it is a protocol rule enforced by code. This makes formalization unusually clean: our definitions do not approximate the subject matter; they \emph{are} the subject matter, transcribed from one formal language (Bitcoin's consensus rules) to another (Lean~4's type theory).
+
+\subsection{Methodology: LLM-Assisted Formal Verification}
+
+This project was produced through a three-party workflow: a human domain expert, an LLM (Claude, Anthropic's AI assistant), and the Lean~4 compiler. We report the contribution decomposition transparently because we believe this methodology is itself a result worth documenting.
+
+The first author's background is in systems theory and trade network analysis, not in mathematics or formal verification. The author identified that Bitcoin's conservation constraints---discrete state transitions under bounded supply---constitute underexplored mathematical structure, located the relevant prior art \citep{nester2020foundation,lambert2021topos,swan2024categorical}, and directed the formalization effort.
+
+The mathematical content---the BRA definition, finiteness proof strategy, IT-BRA construction, collapse functor design, Petri net correspondence, and all proof strategies---was produced by the LLM. The Lean code was written entirely by Claude Code (Anthropic's coding agent), iterating against the compiler until zero errors and zero \sorry{}s remained. The author's irreducible contributions were the research direction, the systems-theoretic framing, the prior art identification, and the meta-insight that an LLM-assisted formal verification pipeline with a compiler trust anchor is a viable methodology.
+
+Three observations merit attention. First, the Lean compiler is the trust anchor. It certifies every proof regardless of who produced it. A reviewer need not trust the LLM's reasoning; they need only trust the Lean type checker, a small, well-audited kernel. The mathematical background of the human author is irrelevant to the correctness of results.
+
+Second, the human's role was curatorial and directional: finding the right problems, choosing formalization targets, and knowing when to push and when to stop. These are contributions that current LLMs cannot make autonomously---they require domain knowledge, taste, and strategic awareness of what constitutes a publishable contribution.
+
+Third, this paper is, to our knowledge, among the first to report an LLM-assisted theorem proving workflow that produces a \sorry{}-free Lean library containing \emph{novel} mathematical content---not textbook exercises but a new computational class with original separation results. The LLM handles Mathlib API navigation, tactic selection, and proof construction. The compiler handles trust. The human handles what neither can do: knowing what is worth proving.
+
+\subsection{Limitations}
+
+Five theorems remain as placeholders, each requiring infrastructure beyond the current library:
+\begin{itemize}
+\item \lean{bra\_strictly\_weaker\_than\_fsa} (DFA formalization),
+\item \lean{itbra\_family\_beyond\_regular} (IT-BRA family for~$\{a^n b^n\}$),
+\item \lean{collapse\_not\_full} and \lean{collapse\_not\_monoidal} (morphism/monoidal category infrastructure),
+\item \lean{bra\_reachability\_decidable} (Petri net reachability algorithms).
+\end{itemize}
+The collapse map is defined as a function, not a functor in Mathlib's category theory sense.
+
+
+%% ============================================================
+\section{Related Work}\label{sec:related}
+%% ============================================================
+
+\paragraph{Categorical ledger theory.}
+\citet{nester2020foundation} establishes the foundational categorical framework for UTXO ledgers as symmetric monoidal categories. His construction $C(X)$ freely adds ownership structure, and for a Bitcoin-like ledger yields $C(N_\nu)$. We build directly on this framework but go beyond it in three ways: computational class characterization, cross-model comparison, and mechanical verification. \citet{nester2023concurrent} extends to concurrent process histories; our IT-BRA identity model is related. \citet{lambert2021topos} models consensus via topos theory---orthogonal to our computational power questions. A bridge connecting Nester's SMC to Lambert's topos is an important open problem. \citet{swan2024categorical} surveys the field broadly; our contribution is narrower and verified.
+
+\paragraph{Petri net theory.}
+\citet{meseguer1990petri} prove that Petri nets are commutative monoids, establishing the algebraic foundation our construction follows. \citet{karp1969parallel} develop the coverability tree. \citet{rackoff1978covering} proves that the covering and boundedness problems for vector addition systems are in EXPSPACE; for bounded nets, reachability is in PSPACE for fixed dimension. Our Theorem~\ref{thm:bounded} places BRA reachability within this decidable fragment. \citet{czerwinski2019reachability} recently proved VAS reachability Ackermann-complete for unbounded nets, underscoring the advantage of our bounded case.
+
+\paragraph{Formal verification.}
+Most formal verification of cryptocurrency uses model checking or domain-specific frameworks. Interactive theorem proving with Lean~4 offers richer mathematical properties (surjectivity, conservation as algebraic identities) than the state-based properties typical of model checking.
+
+
+%% ============================================================
+\section{Future Work}\label{sec:future}
+%% ============================================================
+
+The most pressing open task is constructing an IT-BRA family recognizing $\{a^n b^n\}$: for bound~$C$, create $n$~identified UTXOs on $a$-symbols, consume them on $b$-symbols. The family over all~$C$ would formalize IT-BRA~$\supsetneq$~FSA. The placeholder collapse properties require morphism categories, feasible with Mathlib's category theory library.
+
+The most provocative open question is whether IT-BRA is strictly below Turing machines. In the \emph{blind} variant, where transitions see only the active UTXO set, the working memory is bounded by~$C$ (each UTXO has value $\geq 1$), suggesting sub-Turing power. In the \emph{history-aware} variant, where transitions can check whether an identifier was previously spent, the write-only history grows without bound and may suffice for Turing completeness. Bitcoin's actual model is closer to the blind variant. The exact relationship to counter machines and pushdown automata is open.
+
+Defining Btc and Eth as proper categories with collapse as a functor would enable standard categorical statements of faithfulness and fullness. BRA instantiates Bunge's concrete system framework---composition (UTXO multiset), environment (mempool and network), structure (validation rules including conservation)---and a formalization of this systems ontology with BRA as a verified instance is in progress.
+
+
+%% ============================================================
+\section{Conclusion}
+%% ============================================================
+
+We introduced Bounded-Resource Automata as a computational model for conservation-constrained systems, proved that value-only BRA has a finite state space while identity-tracking BRA has an infinite one, established a Petri net correspondence via a verified weighted place invariant, and defined a collapse map from UTXO to account models whose structural properties precisely characterize the information loss in the passage from granular to aggregate representations. Every result is machine-checked in Lean~4 with Mathlib: 882 lines, 74 declarations, zero \sorry{}s. The library is available as anonymous supplementary material.
+
+
+%% ============================================================
+%% Acknowledgments
+%% ============================================================
+\begin{acks}
+The mathematical content, proof strategies, and Lean~4 code in this work were produced with substantial assistance from Claude (Anthropic). The contribution decomposition is described in Section~\ref{sec:formalization}. The Lean~4 compiler serves as the independent trust anchor for all results.
+\end{acks}
+
+%% ============================================================
+%% Bibliography
+%% ============================================================
+\bibliography{references}
+
+\end{document}
